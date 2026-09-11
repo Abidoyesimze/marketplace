@@ -46,6 +46,7 @@ impl LendingContract {
 
     /// One-time initializer. Must be called once immediately after deployment.
     /// Panics if the contract has already been configured.
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -214,16 +215,19 @@ impl LendingContract {
             panic!("Under-collateralized");
         }
 
+        // Validate nft_contract is a valid token contract before initiating transfers
+        let nft_client = token::Client::new(&env, &listing.nft_contract);
+        let _ = nft_client.decimals();
+
         // Transfer collateral from borrower to contract
         let collateral_client = token::Client::new(&env, &collateral_currency);
         collateral_client.transfer(
             &borrower,
-            &env.current_contract_address(),
+            env.current_contract_address(),
             &collateral_amount,
         );
 
         // Transfer NFT from contract to borrower
-        let nft_client = token::Client::new(&env, &listing.nft_contract);
         nft_client.transfer(
             &env.current_contract_address(),
             &borrower,
