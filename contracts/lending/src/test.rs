@@ -1186,7 +1186,6 @@ fn test_admin_set_fees_combined_ge_10000_panics() {
     client.admin_set_fees(&5000, &5000);
 }
 
-
 // ─── End-to-End Lifecycle Tests ──────────────────────────────────────────────
 
 use crate::contract::{LendingContract, LendingContractClient};

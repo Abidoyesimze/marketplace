@@ -354,7 +354,6 @@ impl LendingContract {
             panic!("Position is not Active");
         }
 
-
         let now = env.ledger().timestamp();
         let config = get_config(&env);
 
@@ -391,7 +390,8 @@ impl LendingContract {
         } else {
             PositionStatus::Liquidated
         };
-        set_position(&env, position_id, &position);        events::emit_position_liquidated(
+        set_position(&env, position_id, &position);
+        events::emit_position_liquidated(
             &env,
             position_id,
             liquidator,
