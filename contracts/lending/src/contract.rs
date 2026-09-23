@@ -1,4 +1,4 @@
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, token, Address, Env, Symbol};
 
 use crate::events;
 use crate::interest::accrued_interest_usd;
@@ -177,9 +177,7 @@ impl LendingContract {
         listing.status = ListingStatus::Cancelled;
         set_listing(&env, listing_id, &listing);
 
-        #[allow(deprecated)]
-        env.events()
-            .publish((symbol_short!("cancel"), listing_id), ());
+        events::emit_listing_cancelled(&env, listing_id, listing.lender.clone());
     }
 
     // ── Borrow ────────────────────────────────────────────────────────────────
@@ -197,6 +195,10 @@ impl LendingContract {
 
         if listing.status != ListingStatus::Open {
             panic!("Listing is not Open");
+        }
+
+        if listing.max_duration_days == 0 {
+            panic!("max_duration_days must be greater than zero");
         }
 
         if !is_currency_whitelisted(&env, &collateral_currency) {
@@ -257,9 +259,13 @@ impl LendingContract {
 
         set_position(&env, position_id, &position);
 
-        #[allow(deprecated)]
-        env.events()
-            .publish((symbol_short!("borrow"), position_id), ());
+        events::emit_position_opened(
+            &env,
+            position_id,
+            listing_id,
+            borrower.clone(),
+            collateral_amount,
+        );
 
         position_id
     }
@@ -348,6 +354,7 @@ impl LendingContract {
             panic!("Position is not Active");
         }
 
+
         let now = env.ledger().timestamp();
         let config = get_config(&env);
 
@@ -384,17 +391,13 @@ impl LendingContract {
         } else {
             PositionStatus::Liquidated
         };
-        set_position(&env, position_id, &position);
-
-        #[allow(deprecated)]
-        env.events().publish(
-            (symbol_short!("liquidate"), position_id),
-            (
-                liquidator,
-                result.lender_payout,
-                result.liquidator_payout,
-                result.borrower_rem,
-            ),
+        set_position(&env, position_id, &position);        events::emit_position_liquidated(
+            &env,
+            position_id,
+            liquidator,
+            result.lender_payout,
+            result.liquidator_payout,
+            result.borrower_rem,
         );
     }
 }
