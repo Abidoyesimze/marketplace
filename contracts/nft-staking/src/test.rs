@@ -523,3 +523,245 @@ fn test_unstake_fails_when_staked_by_different_user() {
         "NFT must remain in the staking pool's custody"
     );
 }
+
+// ── Issue #829: is_paused ────────────────────────────────────────────────────
+
+/// Default state: a freshly initialized pool is not paused.
+#[test]
+fn test_is_paused_defaults_to_false() {
+    let (_env, staking, _user, _collection, _admin) = setup_with_mock();
+    assert!(!staking.is_paused());
+}
+
+/// `is_paused` reflects `set_paused` toggles exactly.
+#[test]
+fn test_is_paused_reflects_set_paused() {
+    let (_env, staking, _user, _collection, _admin) = setup_with_mock();
+
+    staking.set_paused(&true);
+    assert!(staking.is_paused());
+
+    staking.set_paused(&false);
+    assert!(!staking.is_paused());
+}
+
+/// When paused, stake and unstake entrypoints are gated by `ContractPaused`
+/// and pre-existing state is left untouched.
+#[test]
+fn test_is_paused_blocks_stake_and_unstake() {
+    let (env, staking, user, collection, _admin) = setup_with_mock();
+
+    mint_token(&env, &collection, &user, 0);
+    staking.stake(&user, &collection, &0);
+
+    staking.set_paused(&true);
+    assert!(staking.is_paused());
+
+    // New stakes are rejected while paused.
+    mint_token(&env, &collection, &user, 1);
+    let stake_err = staking
+        .try_stake_erc721(&user, &collection, &1)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(stake_err, StakingError::ContractPaused.into());
+
+    // Unstaking the existing position is also rejected while paused.
+    let unstake_err = staking
+        .try_unstake_erc721(&user, &collection, &0)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(unstake_err, StakingError::ContractPaused.into());
+
+    // State untouched by the rejected calls.
+    assert!(staking
+        .get_staked_position(&user, &collection, &0)
+        .is_some());
+    assert_eq!(staking.total_staked(), 1);
+
+    // Unpausing restores normal operation.
+    staking.set_paused(&false);
+    assert!(!staking.is_paused());
+    staking.unstake_erc721(&user, &collection, &0);
+    assert!(staking
+        .get_staked_position(&user, &collection, &0)
+        .is_none());
+}
+
+// ── Issue #832: unstake_erc721 ───────────────────────────────────────────────
+
+/// Happy path: direct `unstake_erc721` returns the NFT and clears all state.
+#[test]
+fn test_unstake_erc721_happy_path_returns_nft_and_clears_state() {
+    let (env, staking, user, collection, _admin) = setup_with_mock();
+
+    mint_token(&env, &collection, &user, 0);
+    staking.stake_erc721(&user, &collection, &0);
+    assert_eq!(staking.total_staked(), 1);
+
+    staking.unstake_erc721(&user, &collection, &0);
+
+    assert!(staking
+        .get_staked_position(&user, &collection, &0)
+        .is_none());
+    assert_eq!(staking.total_staked(), 0);
+    assert_eq!(staking.get_user_stakes(&user).len(), 0);
+
+    let owner: Address = env.invoke_contract(
+        &collection,
+        &Symbol::new(&env, "owner_of"),
+        soroban_sdk::vec![&env, 0u64.into_val(&env)],
+    );
+    assert_eq!(owner, user);
+}
+
+/// Rewards path: `unstake_erc721` pays `elapsed * rate` before wiping the position.
+#[test]
+fn test_unstake_erc721_pays_accrued_rewards() {
+    let (env, staking, user, collection, reward_token) = setup_for_claim();
+
+    env.ledger().set_timestamp(1000);
+    mint_token(&env, &collection, &user, 0);
+    staking.stake_erc721(&user, &collection, &0);
+
+    env.ledger().set_timestamp(1500);
+    staking.unstake_erc721(&user, &collection, &0);
+
+    let expected = 500i128 * REWARD_RATE;
+    assert_eq!(reward_token.balance(&user), expected);
+    assert!(staking
+        .get_staked_position(&user, &collection, &0)
+        .is_none());
+    assert_eq!(staking.total_staked(), 0);
+
+    let owner: Address = env.invoke_contract(
+        &collection,
+        &Symbol::new(&env, "owner_of"),
+        soroban_sdk::vec![&env, 0u64.into_val(&env)],
+    );
+    assert_eq!(owner, user);
+}
+
+/// Direct `unstake_erc721` on a never-staked token reverts with `NotStaked`.
+#[test]
+fn test_unstake_erc721_fails_when_not_staked() {
+    let (env, staking, user, collection, _admin) = setup_with_mock();
+
+    mint_token(&env, &collection, &user, 0);
+
+    let err = staking
+        .try_unstake_erc721(&user, &collection, &0)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, StakingError::NotStaked.into());
+    assert_eq!(staking.total_staked(), 0);
+
+    let owner: Address = env.invoke_contract(
+        &collection,
+        &Symbol::new(&env, "owner_of"),
+        soroban_sdk::vec![&env, 0u64.into_val(&env)],
+    );
+    assert_eq!(owner, user);
+}
+
+/// Paused pool: `unstake_erc721` reverts with `ContractPaused` and keeps state.
+#[test]
+fn test_unstake_erc721_fails_when_paused() {
+    let (env, staking, user, collection, _admin) = setup_with_mock();
+
+    mint_token(&env, &collection, &user, 0);
+    staking.stake_erc721(&user, &collection, &0);
+
+    staking.set_paused(&true);
+    let err = staking
+        .try_unstake_erc721(&user, &collection, &0)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, StakingError::ContractPaused.into());
+
+    assert!(staking
+        .get_staked_position(&user, &collection, &0)
+        .is_some());
+    assert_eq!(staking.total_staked(), 1);
+    let owner: Address = env.invoke_contract(
+        &collection,
+        &Symbol::new(&env, "owner_of"),
+        soroban_sdk::vec![&env, 0u64.into_val(&env)],
+    );
+    assert_eq!(owner, staking.address);
+}
+
+/// Wrong collection: `unstake_erc721` reverts with `InvalidToken`.
+#[test]
+fn test_unstake_erc721_fails_with_wrong_token() {
+    let (env, staking, user, collection, _admin) = setup_with_mock();
+    let wrong_token = Address::generate(&env);
+
+    mint_token(&env, &collection, &user, 0);
+    staking.stake_erc721(&user, &collection, &0);
+
+    let err = staking
+        .try_unstake_erc721(&user, &wrong_token, &0)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, StakingError::InvalidToken.into());
+
+    assert!(staking
+        .get_staked_position(&user, &collection, &0)
+        .is_some());
+    assert_eq!(staking.total_staked(), 1);
+}
+
+/// Underfunded rewards: `unstake_erc721` reverts with `InsufficientRewardBalance`.
+#[test]
+fn test_unstake_erc721_fails_when_insufficient_reward_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let collection = env.register_contract(None, mock_nft::MockNft);
+    let reward_token = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+
+    let staking_id = env.register_contract(None, crate::NftStaking);
+    let staking = NftStakingClient::new(&env, &staking_id);
+    staking.init(&admin, &collection, &reward_token, &REWARD_RATE);
+
+    // Fund with a dust amount so the accrued payout cannot be covered.
+    StellarAssetClient::new(&env, &reward_token).mint(&staking_id, &1_000_i128);
+
+    env.ledger().set_timestamp(1000);
+    mint_token(&env, &collection, &user, 0);
+    staking.stake_erc721(&user, &collection, &0);
+
+    env.ledger().set_timestamp(1500);
+    let err = staking
+        .try_unstake_erc721(&user, &collection, &0)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, StakingError::InsufficientRewardBalance.into());
+
+    // Failed unstake must not wipe the position.
+    assert!(staking
+        .get_staked_position(&user, &collection, &0)
+        .is_some());
+    assert_eq!(staking.total_staked(), 1);
+}
+
+/// Second unstake of the same token reverts with `NotStaked`.
+#[test]
+fn test_unstake_erc721_double_unstake_fails() {
+    let (env, staking, user, collection, _admin) = setup_with_mock();
+
+    mint_token(&env, &collection, &user, 0);
+    staking.stake_erc721(&user, &collection, &0);
+    staking.unstake_erc721(&user, &collection, &0);
+
+    let err = staking
+        .try_unstake_erc721(&user, &collection, &0)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, StakingError::NotStaked.into());
+    assert_eq!(staking.total_staked(), 0);
+}
